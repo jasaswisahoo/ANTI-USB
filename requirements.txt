@@ -1,11 +1,12 @@
-Flask==2.3.3
-flask-socketio==5.3.6
-flask-cors==4.0.0
-python-socketio==5.9.0
-eventlet==0.36.1
-gunicorn==21.2.0
-Pillow==10.0.1
-requests==2.31.0
-psutil==5.9.6
-geocoder==1.38.1
+Flask
+flask-socketio
+flask-cors
+python-socketio
+eventlet
+gunicorn
+Pillow
+requests
+psutil
+geocoder
+
 
