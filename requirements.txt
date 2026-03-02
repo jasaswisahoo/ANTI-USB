@@ -1,15 +1,1 @@
-Flask
-flask-socketio
-flask-cors
-python-socketio
-eventlet
-gunicorn
-Pillow
-requests
-geocoder
-opencv-python-headless
-pyaudio
-pywin32
-cryptography
-keyboard
 
